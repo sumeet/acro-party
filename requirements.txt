@@ -1,0 +1,2 @@
+stability-sdk==0.2.9
+py-cord[speed]==2.2.2
