@@ -14,14 +14,14 @@ NUM_ROUNDS = 10
 
 bot = discord.Bot()
 
-# <player-1> /acro_party_new
-# <bot> Welcome to Acro Party! Type /acro_party_join before the game starts to play along. Type /acro_party_start to start the game.
+# <player-1> /acro_new
+# <bot> Welcome to Acro Party! Type /acro_join before the game starts to play along. Type /acro_start to start the game.
 # // Note: starting implicitly joins, so player-1 will automatically be part of the game, since they started it
-# <player-2> /acro_party_join
+# <player-2> /acro_join
 # <bot> A NEW CHALLENGER HAS APPEARED! <player-2>
-# <player-3> /acro_party_join
+# <player-3> /acro_join
 # <bot> A NEW CHALLENGER HAS APPEARED! <player-3>
-# <player-1> /acro_party_start
+# <player-1> /acro_start
 # <bot> The game has started! Today's contestants are: <player-1>, <player-2>, <player-3>. Wish them luck!
 # <bot> There will be 10 rounds.
 
@@ -39,21 +39,36 @@ class Game:
         self.is_done = False
 
         self._rounds = []
-        self._event_queue = asyncio.Queue()
+        self._submission_q = asyncio.Queue()
         self._game_channel = game_channel
 
     @property
     def current_round_no(self):
         return len(self._rounds)
 
+    @property
+    def current_round(self):
+        return self._rounds[-1]
+
     def add_player(self, player):
         self.players.append(player)
 
-    def start_game(self):
-        self._rounds.append(Round())
+    async def wait_submissions(self):
+        for _ in range(len(self.players)):
+            next_player = await self._submission_q.get()
+            yield next_player
+            self._submission_q.task_done()
 
-    def add_response(self, player, response):
-        self.responses[player] = response
+    def start(self):
+        self._rounds.append(Round.gen_with_acro())
+
+    async def add_response(self, player, response):
+        await self.current_round.add_response(player, response)
+        await self._submission_q.put(player)
+
+    @property
+    def num_submissions_remaining(self):
+        return len(self.players) - self.current_round.num_responses
 
 
 def get_current_game(ctx):
@@ -68,9 +83,20 @@ def make_and_set_new_game(ctx):
 
 
 class Round:
+    ACRO_LEN_MIN = 4
+    ACRO_LEN_MAX = 6
+
+    @classmethod
+    def gen_with_acro(cls):
+        return cls(gen_acro(cls.ACRO_LEN_MIN, cls.ACRO_LEN_MAX))
+
     def __init__(self, acro):
         self.acro = acro
         self.responses = []
+
+    @property
+    def num_responses(self):
+        return len(self.responses)
 
     async def add_response(self, player, response_text):
         if "".join(word[0] for word in response_text.strip().split(" ")).upper() != self.acro:
@@ -80,25 +106,20 @@ class Round:
     class ResponseDoesNotMatchAcroError(Exception):
         pass
 
-    ACRO_LEN_MIN = 4
-    ACRO_LEN_MAX = 6
-
-    @classmethod
-    def gen_with_acro(cls):
-        return cls(gen_acro(cls.ACRO_LEN_MIN, cls.ACRO_LEN_MAX))
-
 
 class Response:
-    def __init__(self, player, response_txt, response_img):
+    def __init__(self, player, response_txt, response_img_bytes, id=None):
+        self.id = id or "".join(random.choices(string.ascii_letters + string.digits, k=8))
+
         self.player = player
         self.response_txt = response_txt
-        self.response_img = response_img
+        self.response_img_bytes = response_img_bytes
         self.num_votes = 0
 
     @classmethod
     async def gen_img(cls, player, response_txt):
-        response_img = await gen_img(response_txt)
-        return cls(player, response_txt, response_img)
+        response_img_bytes = await gen_img(response_txt)
+        return cls(player, response_txt, response_img_bytes)
 
 
 @bot.slash_command(description="Make a new Acro Party!")
@@ -109,13 +130,19 @@ async def acro_new(ctx):
         await ctx.respond("There is already a game in progress!")
         return
     make_and_set_new_game(ctx)
+
+    # TODO: move game loop here instead of in acro_start
+    # for starters, then we can easily edit this message to show all players who have joined the game, instead of
+    # spamming the channel with a message for each player, also that way it's harder to tell who all is playing
+    #
+    # then maybe later we can have a "Join" button to make it easy to join the game
     await ctx.respond("Welcome to Acro Party! Type `/acro_join` before the game starts to play along.")
 
 
 @bot.slash_command(description="Join the current Acro Party!")
 async def acro_join(ctx):
     if not (game := get_current_game(ctx)):
-        await ctx.respond("There is no game in progress!")
+        await ctx.respond("There is no game in progress!", ephemeral=True)
         return
     game.add_player(ctx.author)
     await ctx.respond(f"A NEW CHALLENGER HAS APPEARED! {mention(ctx.author)}")
@@ -131,13 +158,14 @@ NEWLINE = "\n"
 @bot.slash_command(description="Start the Acro Party!")
 async def acro_start(ctx):
     if not (game := get_current_game(ctx)):
-        await ctx.respond("There is no game in progress")
+        await ctx.respond("There is no game in progress", ephemeral=True)
         return
 
     # game intro
+    game.start()
     await ctx.respond(
         f"The game has started! Today's contestants are: \n"
-        f"{NEWLINE.join(f'- {mention(player)}' for player in current_game.players)}.\n"
+        f"{NEWLINE.join(f'- {mention(player)}' for player in game.players)}.\n"
         f"Wish them luck!\n"
         "\n"
         # might add future instructions for how the game works here
@@ -145,9 +173,26 @@ async def acro_start(ctx):
     )
 
     while not game.is_done:
+        this_round = game.current_round
+
+        # announce acronym
         await ctx.respond(
-            f"Round {game.current_round_no} of {game.num_rounds}. Your acronym is **`{current_game.acro}`**. Type `/acro_submit <your answer>` to submit your answer."
+            f"Round {game.current_round_no} of {game.num_rounds}. Your acronym is **`{this_round.acro}`**. Type `/acro_submit <your answer>` to submit your answer."
         )
+
+        # wait for submissions
+        async for player in game.wait_submissions():
+            # TODO: it's going to say waiting on 0 more which sounds weird
+            await ctx.respond(
+                f"Player {mention(player)} has submitted. Waiting on {game.num_submissions_remaining} more"
+            )
+
+        # voting phase, for now just display all the images
+        for response in game.current_round.responses:
+            await ctx.respond(
+                f"Type `/acro_vote {response.id}` to vote for the following",
+                file=discord.File(response.response_img_bytes, filename="response.png"),
+            )
         # png_bytes = gen_img(prompt)
         # await ctx.respond(file=discord.File(png_bytes, "image.png"))
 
@@ -155,14 +200,19 @@ async def acro_start(ctx):
 
 
 @bot.slash_command(description="Submit your answer to the current Acro Party")
-async def acro_party_submit(ctx, answer: str):
-    global current_game
-
-    if current_game is None:
+async def acro_submit(ctx, answer: str):
+    if not (game := get_current_game(ctx)):
         await ctx.respond("There is no game in progress")
         return
-    current_game.add_response(ctx.author, answer)
-    await ctx.respond(f"{mention(ctx.author)} has submitted their answer")
+    await ctx.defer(ephemeral=True)
+    try:
+        await game.add_response(ctx.author, answer)
+    except Round.ResponseDoesNotMatchAcroError:
+        await ctx.followup(
+            "Your answer does not match the acronym! Make sure every word starts with the following letters: "
+            f"**`{game.current_round.acro}`**, separated by spaces",
+        )
+    await ctx.followup("Your answer has been submitted!")
 
 
 os.environ["STABILITY_HOST"] = "grpc.stability.ai:443"
@@ -187,7 +237,7 @@ async def gen_img(prompt):
                         "Please modify the prompt and try again."
                     )
 
-    return asyncio.to_thread(gen_img_blocking, prompt)
+    return await asyncio.to_thread(gen_img_blocking, prompt)
 
 
 bot.run(open(".discord-key").read().strip())
