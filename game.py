@@ -4,6 +4,8 @@ import itertools
 import os
 import random
 import string
+from collections import defaultdict
+from dataclasses import dataclass
 
 from stability_sdk import client
 from stability_sdk.interfaces.gooseai.generation import generation_pb2 as generation
@@ -13,16 +15,68 @@ os.environ["STABILITY_HOST"] = "grpc.stability.ai:443"
 os.environ["STABILITY_KEY"] = open(".dreamstudio-key").read().strip()
 
 
+class ScoreBreakdown:
+    def __init__(self):
+        self._scores = []
+
+    def add(self, score):
+        self._scores.append(score)
+
+    @property
+    def total_points(self):
+        return sum(s.num_points for s in self._scores)
+
+    @property
+    def total_points_str(self):
+        return f"{self.total_points} points" if self.total_points != 1 else "1 point"
+
+    def __str__(self):
+        return " and ".join(map(str, self._scores)) + f" for a total of {self.total_points_str}"
+
+
+@dataclass
+class ScoreByVote:
+    num_votes: int
+
+    def __str__(self):
+        if self.num_votes == 1:
+            return "1 point from a vote"
+        return f"{self.num_votes} points from votes"
+
+    @property
+    def num_points(self):
+        return self.num_votes
+
+
+class ScoreByVotingForWinner:
+    def __str__(self):
+        return "a point for voting for the winner"
+
+    @property
+    def num_points(self):
+        return 1
+
+
 class Game:
     def __init__(self, initial_player, game_channel, num_rounds=NUM_ROUNDS):
         self.players = [initial_player]
         self.num_rounds = num_rounds
-        self.is_done = False
 
         self._rounds = []
         self._submission_q = asyncio.Queue()
         self._vote_q = asyncio.Queue()
+        self._join_q = asyncio.Queue()
         self._game_channel = game_channel
+
+    @property
+    def winners(self):
+        num_votes_by_player = defaultdict(int)
+        for round in self._rounds:
+            for submission in round.submissions:
+                num_votes_by_player[submission.player] += submission.num_votes
+            for voter in round.winning_submission.voters:
+                num_votes_by_player[voter] += 1
+        return sorted(num_votes_by_player, key=lambda x: x[1], reverse=True)
 
     @property
     def current_round_no(self):
@@ -32,15 +86,33 @@ class Game:
     def current_round(self):
         return self._rounds[-1]
 
-    def add_player(self, player):
-        self.players.append(player)
+    class PlayerAlreadyJoinedError(Exception):
+        pass
 
+    async def add_player(self, player):
+        if player in self.players:
+            raise self.PlayerAlreadyJoinedError
+        self.players.append(player)
+        await self._join_q.put(player)
+
+    async def wait_til_start(self):
+        while True:
+            player = await self._join_q.get()
+            self._join_q.task_done()
+            if player:
+                yield player
+            else:
+                break
+
+    # returns tuple of (player, is_waiting) bc stable diffusion can be slow
     async def add_submission(self, player, submission):
+        await self._submission_q.put((player, False))
         await self.current_round.add_submission(player, submission)
-        await self._submission_q.put(player)
+        await self._submission_q.put((player, True))
 
     async def wait_submissions(self):
-        for _ in range(len(self.players)):
+        # * 2 because one for is_waiting = True, and another for False
+        for _ in range(len(self.players) * 2):
             next_player = await self._submission_q.get()
             yield next_player
             self._submission_q.task_done()
@@ -54,11 +126,14 @@ class Game:
             next_player = await self._vote_q.get()
             yield next_player
 
-    def start(self):
-        self.next_round()
+    async def start(self):
+        await self._join_q.put(None)
 
-    def next_round(self):
-        self._rounds.append(Round.gen_with_acro())
+    def create_rounds(self):
+        for _ in range(self.num_rounds):
+            round = Round.gen_with_acro()
+            self._rounds.append(round)
+            yield round
 
     @property
     def num_submissions_remaining(self):
@@ -68,10 +143,22 @@ class Game:
     def num_votes_remaining(self):
         return len(self.players) - self.current_round.num_votes
 
+    class IsOverError(Exception):
+        pass
+
 
 class Round:
     ACRO_LEN_MIN = 3
     ACRO_LEN_MAX = 6
+
+    @property
+    def score_breakdown(self):
+        score_by_player = defaultdict(ScoreBreakdown)
+        for submission in self.submissions:
+            score_by_player[submission.player].add(ScoreByVote(submission.num_votes))
+        for voter in self.winning_submission.voters:
+            score_by_player[voter].add(ScoreByVotingForWinner())
+        return score_by_player
 
     @classmethod
     def gen_with_acro(cls):
@@ -107,8 +194,16 @@ class Round:
         return sum(submission.num_votes for submission in self.submissions)
 
     @property
+    def winning_submission(self):
+        return max(self.submissions, key=lambda x: x.num_votes)
+
+    @property
     def all_voter_user_ids(self):
         return itertools.chain(*(submission.voter_user_ids for submission in self.submissions))
+
+    @property
+    def all_voters(self):
+        return itertools.chain(*(submission.voters for submission in self.submissions))
 
     class SubmissionDoesNotMatchAcroError(Exception):
         pass
@@ -139,6 +234,10 @@ class Submission:
     @property
     def voter_user_ids(self):
         return [user.id for user in self._voted_by_users]
+
+    @property
+    def voters(self):
+        return self._voted_by_users
 
     @classmethod
     async def gen_img(cls, player, submission_txt):
