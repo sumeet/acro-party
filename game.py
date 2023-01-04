@@ -31,7 +31,7 @@ class ScoreBreakdown:
         return f"{self.total_points} points" if self.total_points != 1 else "1 point"
 
     def __str__(self):
-        return " and ".join(map(str, self._scores)) + f" for a total of {self.total_points_str}"
+        return " + ".join(map(str, self._scores)) + f" = {self.total_points_str}"
 
 
 @dataclass
@@ -50,11 +50,20 @@ class ScoreByVote:
 
 class ScoreByVotingForWinner:
     def __str__(self):
-        return "a point for voting for the winner"
+        return "1 point for voting for the winner"
 
     @property
     def num_points(self):
         return 1
+
+
+class ScoreVotedForSelf:
+    def __str__(self):
+        return "1 point deducted for voting for themselves"
+
+    @property
+    def num_points(self):
+        return -1
 
 
 class Game:
@@ -72,11 +81,9 @@ class Game:
     def winners(self):
         num_votes_by_player = defaultdict(int)
         for round in self._rounds:
-            for submission in round.submissions:
-                num_votes_by_player[submission.player] += submission.num_votes
-            for voter in round.winning_submission.voters:
-                num_votes_by_player[voter] += 1
-        return sorted(num_votes_by_player, key=lambda x: x[1], reverse=True)
+            for player, breakdown in round.score_breakdown.items():
+                num_votes_by_player[player] += breakdown.total_points
+        return sorted(num_votes_by_player.items(), key=lambda x: x[1], reverse=True)
 
     @property
     def current_round_no(self):
@@ -155,7 +162,14 @@ class Round:
     def score_breakdown(self):
         score_by_player = defaultdict(ScoreBreakdown)
         for submission in self.submissions:
-            score_by_player[submission.player].add(ScoreByVote(submission.num_votes))
+            num_other_voters = 0
+            for voter in submission.voters:
+                if voter == submission.player:
+                    score_by_player[voter].add(ScoreVotedForSelf())
+                else:
+                    num_other_voters += 1
+            if num_other_voters > 0:
+                score_by_player[submission.player].add(ScoreByVote(num_other_voters))
         for voter in self.winning_submission.voters:
             score_by_player[voter].add(ScoreByVotingForWinner())
         return score_by_player
@@ -182,9 +196,6 @@ class Round:
             raise self.AlreadyVotedError
         for submission in self.submissions:
             if submission.id == submission_id:
-                if player.id == submission.player.id:
-                    raise self.CantVoteForYourselfError
-
                 submission.add_vote(player)
                 return
         raise self.SubmissionDoesNotExistError
@@ -212,9 +223,6 @@ class Round:
         pass
 
     class AlreadyVotedError(Exception):
-        pass
-
-    class CantVoteForYourselfError(Exception):
         pass
 
 
