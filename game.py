@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from stability_sdk import client
 from stability_sdk.interfaces.gooseai.generation import generation_pb2 as generation
 
-NUM_ROUNDS = 2
+NUM_ROUNDS = 5
 os.environ["STABILITY_HOST"] = "grpc.stability.ai:443"
 os.environ["STABILITY_KEY"] = open(".dreamstudio-key").read().strip()
 
