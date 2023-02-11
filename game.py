@@ -10,9 +10,12 @@ from dataclasses import dataclass
 from stability_sdk import client
 from stability_sdk.interfaces.gooseai.generation import generation_pb2 as generation
 
+import conf
+
+
 NUM_ROUNDS = 5
 os.environ["STABILITY_HOST"] = "grpc.stability.ai:443"
-os.environ["STABILITY_KEY"] = open(".dreamstudio-key").read().strip()
+os.environ["STABILITY_KEY"] = conf.DREAMSTUDIO_KEY
 
 
 class ScoreBreakdown:
@@ -250,6 +253,7 @@ class Submission:
     @classmethod
     async def gen_img(cls, player, submission_txt):
         submission_img_bytes = await gen_img(submission_txt)
+        # TODO: non uniform distribution based on word frequency
         id = "".join(random.choices(string.ascii_letters + string.digits, k=8))
         return cls(player, submission_txt, submission_img_bytes, id)
 
@@ -270,6 +274,11 @@ stability_api = client.StabilityInference(
     verbose=True,
 )
 
+# TODO: end the game when it ends
+# TODO: only give start button to creator
+# TODO: remove the answer button after you answer
+# TODO: get list of words in the model
+
 
 # returns a `bytes` with the image png data
 async def gen_img(prompt):
@@ -280,9 +289,9 @@ async def gen_img(prompt):
                 if artifact.type == generation.ARTIFACT_IMAGE:
                     return artifact.binary
                 if artifact.finish_reason == generation.FILTER:
-                    raise Exception(
-                        "Your request activated the API's safety filters and could not be processed."
-                        "Please modify the prompt and try again."
-                    )
+                    raise SafetyFilterError
 
     return await asyncio.to_thread(gen_img_blocking, prompt)
+
+class SafetyFilterError(Exception):
+    pass

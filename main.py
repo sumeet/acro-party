@@ -1,6 +1,7 @@
 import discord
 
 from game import NUM_ROUNDS, Game, Round
+import conf
 
 bot = discord.Bot()
 
@@ -207,4 +208,4 @@ async def on_ready():
 
 if __name__ == "__main__":
     # TODO: print a message when the bot connects
-    bot.run(open(".discord-key").read().strip())
+    bot.run(conf.DISCORD_KEY)
