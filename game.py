@@ -253,7 +253,6 @@ class Submission:
     @classmethod
     async def gen_img(cls, player, submission_txt):
         submission_img_bytes = await gen_img(submission_txt)
-        # TODO: non uniform distribution based on word frequency
         id = "".join(random.choices(string.ascii_letters + string.digits, k=8))
         return cls(player, submission_txt, submission_img_bytes, id)
 
@@ -265,8 +264,16 @@ class Submission:
         self._voted_by_users.append(player)
 
 
+# from https://en.wikipedia.org/wiki/Letter_frequency#Relative_frequencies_of_the_first_letters_of_a_word_in_English_language
+letter_freq_a_z = [5.7, 6.0, 9.4, 6.1, 3.9, 4.1, 3.3, 3.7, 3.9, 1.1, 1.0, 3.1, 5.6, 2.2, 2.5, 7.7, 0.49, 6.0, 11.0, 5.0, 2.9, 1.5, 2.7, 0.05, 0.36, 0.24]
+
+
 def gen_acro(low_range, hi_range):
-    return "".join(random.choice(string.ascii_uppercase) for _ in range(random.randint(low_range, hi_range)))
+    num_letters = random.randint(low_range, hi_range)
+    return "".join(random.choices(string.ascii_uppercase, k=num_letters, weights=letter_freq_a_z))
+
+
+print(gen_acro(Round.ACRO_LEN_MIN, Round.ACRO_LEN_MAX))
 
 
 stability_api = client.StabilityInference(
@@ -295,3 +302,4 @@ async def gen_img(prompt):
 
 class SafetyFilterError(Exception):
     pass
+
